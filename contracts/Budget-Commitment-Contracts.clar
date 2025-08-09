@@ -187,3 +187,77 @@
 (define-read-only (get-next-request-id (user principal))
   (get next-id (default-to {next-id: u1} (map-get? approval-counters {user: user})))
 )
+
+(define-map spending-history
+  { user: principal, transaction-id: uint }
+  {
+    amount: uint,
+    recipient: principal,
+    reason: (string-ascii 100),
+    category: (string-ascii 20),
+    executed-at: uint,
+    block-height: uint
+  }
+)
+
+(define-map transaction-counters
+  { user: principal }
+  { total-transactions: uint }
+)
+
+(define-public (set-expense-category (request-id uint) (category (string-ascii 20)))
+  (let (
+    (user tx-sender)
+    (request (unwrap! (map-get? pending-approvals {user: user, request-id: request-id}) err-not-found))
+  )
+    (asserts! (not (get approved request)) err-unauthorized)
+    (ok true)
+  )
+)
+
+(define-private (record-spending-history (user principal) (amount uint) (recipient principal) (reason (string-ascii 100)))
+  (let (
+    (counter (default-to {total-transactions: u0} (map-get? transaction-counters {user: user})))
+    (transaction-id (+ (get total-transactions counter) u1))
+    (category (extract-category reason))
+  )
+    (map-set spending-history
+      {user: user, transaction-id: transaction-id}
+      {
+        amount: amount,
+        recipient: recipient,
+        reason: reason,
+        category: category,
+        executed-at: stacks-block-height,
+        block-height: stacks-block-height
+      }
+    )
+    (map-set transaction-counters {user: user} {total-transactions: transaction-id})
+    (ok transaction-id)
+  )
+)
+
+(define-private (extract-category (reason (string-ascii 100)))
+  "general"
+)
+
+(define-read-only (get-spending-history (user principal) (transaction-id uint))
+  (map-get? spending-history {user: user, transaction-id: transaction-id})
+)
+
+(define-read-only (get-total-transactions (user principal))
+  (get total-transactions (default-to {total-transactions: u0} (map-get? transaction-counters {user: user})))
+)
+
+(define-read-only (calculate-spending-rate (user principal))
+  (let (
+    (commitment (unwrap! (map-get? budget-commitments {user: user}) err-not-found))
+    (blocks-elapsed (- stacks-block-height (get created-at commitment)))
+    (spent-amount (get spent-amount commitment))
+  )
+    (if (> blocks-elapsed u0)
+      (ok (/ spent-amount blocks-elapsed))
+      (ok u0)
+    )
+  )
+)
