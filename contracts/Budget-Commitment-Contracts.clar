@@ -8,6 +8,10 @@
 (define-constant err-commitment-locked (err u106))
 (define-constant err-spending-limit-exceeded (err u107))
 
+(define-constant err-refill-not-due (err u108))
+(define-constant err-recurring-not-found (err u109))
+(define-constant err-invalid-interval (err u110))
+
 (define-map budget-commitments
   { user: principal }
   {
@@ -259,5 +263,114 @@
       (ok (/ spent-amount blocks-elapsed))
       (ok u0)
     )
+  )
+)
+
+
+(define-map recurring-commitments
+  { user: principal }
+  {
+    refill-amount: uint,
+    refill-limit: uint,
+    interval-blocks: uint,
+    last-refill-block: uint,
+    auto-refill-enabled: bool,
+    max-refills: uint,
+    refills-completed: uint
+  }
+)
+
+(define-public (setup-recurring-commitment 
+  (refill-amount uint) 
+  (refill-limit uint) 
+  (interval-blocks uint) 
+  (max-refills uint))
+  (let (
+    (user tx-sender)
+    (existing-commitment (map-get? budget-commitments {user: user}))
+  )
+    (asserts! (> refill-amount u0) err-invalid-amount)
+    (asserts! (> interval-blocks u0) err-invalid-interval)
+    (asserts! (> max-refills u0) err-invalid-amount)
+    (asserts! (is-some existing-commitment) err-not-found)
+    
+    (map-set recurring-commitments
+      {user: user}
+      {
+        refill-amount: refill-amount,
+        refill-limit: refill-limit,
+        interval-blocks: interval-blocks,
+        last-refill-block: stacks-block-height,
+        auto-refill-enabled: true,
+        max-refills: max-refills,
+        refills-completed: u0
+      }
+    )
+    
+    (ok true)
+  )
+)
+
+(define-public (execute-refill)
+  (let (
+    (user tx-sender)
+    (recurring (unwrap! (map-get? recurring-commitments {user: user}) err-recurring-not-found))
+    (commitment (unwrap! (map-get? budget-commitments {user: user}) err-not-found))
+    (blocks-passed (- stacks-block-height (get last-refill-block recurring)))
+    (refill-amount (get refill-amount recurring))
+  )
+    (asserts! (get auto-refill-enabled recurring) err-commitment-locked)
+    (asserts! (>= blocks-passed (get interval-blocks recurring)) err-refill-not-due)
+    (asserts! (< (get refills-completed recurring) (get max-refills recurring)) err-spending-limit-exceeded)
+    (asserts! (>= (stx-get-balance user) refill-amount) err-insufficient-funds)
+    
+    (try! (stx-transfer? refill-amount user (as-contract tx-sender)))
+    
+    (map-set budget-commitments
+      {user: user}
+      (merge commitment {
+        locked-amount: (+ (get locked-amount commitment) refill-amount),
+        spending-limit: (get refill-limit recurring)
+      })
+    )
+    
+    (map-set recurring-commitments
+      {user: user}
+      (merge recurring {
+        last-refill-block: stacks-block-height,
+        refills-completed: (+ (get refills-completed recurring) u1)
+      })
+    )
+    
+    (ok refill-amount)
+  )
+)
+
+(define-public (toggle-auto-refill)
+  (let (
+    (user tx-sender)
+    (recurring (unwrap! (map-get? recurring-commitments {user: user}) err-recurring-not-found))
+  )
+    (map-set recurring-commitments
+      {user: user}
+      (merge recurring {auto-refill-enabled: (not (get auto-refill-enabled recurring))})
+    )
+    
+    (ok (not (get auto-refill-enabled recurring)))
+  )
+)
+
+(define-read-only (get-recurring-commitment (user principal))
+  (map-get? recurring-commitments {user: user})
+)
+
+(define-read-only (is-refill-due (user principal))
+  (match (map-get? recurring-commitments {user: user})
+    recurring (let (
+      (blocks-passed (- stacks-block-height (get last-refill-block recurring)))
+    )
+      (>= blocks-passed (get interval-blocks recurring))
+    )
+    false
   )
 )
