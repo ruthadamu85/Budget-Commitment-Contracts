@@ -12,6 +12,11 @@
 (define-constant err-recurring-not-found (err u109))
 (define-constant err-invalid-interval (err u110))
 
+(define-constant err-emergency-not-found (err u111))
+(define-constant err-cooldown-active (err u112))
+(define-constant err-emergency-exists (err u113))
+(define-constant emergency-cooldown-blocks u144)
+
 (define-map budget-commitments
   { user: principal }
   {
@@ -371,6 +376,89 @@
     )
       (>= blocks-passed (get interval-blocks recurring))
     )
+    false
+  )
+)
+
+(define-map emergency-withdrawals
+  { user: principal }
+  {
+    amount: uint,
+    initiated-at: uint,
+    reason: (string-ascii 100),
+    completed: bool
+  }
+)
+
+(define-public (initiate-emergency-withdrawal (reason (string-ascii 100)))
+  (let (
+    (user tx-sender)
+    (commitment (unwrap! (map-get? budget-commitments {user: user}) err-not-found))
+    (locked-amt (get locked-amount commitment))
+  )
+    (asserts! (> locked-amt u0) err-insufficient-funds)
+    (asserts! (is-none (map-get? emergency-withdrawals {user: user})) err-emergency-exists)
+    
+    (map-set emergency-withdrawals
+      {user: user}
+      {
+        amount: locked-amt,
+        initiated-at: stacks-block-height,
+        reason: reason,
+        completed: false
+      }
+    )
+    
+    (ok locked-amt)
+  )
+)
+
+(define-public (complete-emergency-withdrawal)
+  (let (
+    (user tx-sender)
+    (emergency (unwrap! (map-get? emergency-withdrawals {user: user}) err-emergency-not-found))
+    (commitment (unwrap! (map-get? budget-commitments {user: user}) err-not-found))
+    (blocks-passed (- stacks-block-height (get initiated-at emergency)))
+    (withdrawal-amount (get amount emergency))
+  )
+    (asserts! (not (get completed emergency)) err-already-exists)
+    (asserts! (>= blocks-passed emergency-cooldown-blocks) err-cooldown-active)
+    (asserts! (> withdrawal-amount u0) err-insufficient-funds)
+    
+    (try! (as-contract (stx-transfer? withdrawal-amount tx-sender user)))
+    
+    (map-set budget-commitments
+      {user: user}
+      (merge commitment {locked-amount: u0, active: false})
+    )
+    
+    (map-set emergency-withdrawals
+      {user: user}
+      (merge emergency {completed: true})
+    )
+    
+    (ok withdrawal-amount)
+  )
+)
+
+(define-public (cancel-emergency-withdrawal)
+  (let (
+    (user tx-sender)
+    (emergency (unwrap! (map-get? emergency-withdrawals {user: user}) err-emergency-not-found))
+  )
+    (asserts! (not (get completed emergency)) err-already-exists)
+    (map-delete emergency-withdrawals {user: user})
+    (ok true)
+  )
+)
+
+(define-read-only (get-emergency-withdrawal (user principal))
+  (map-get? emergency-withdrawals {user: user})
+)
+
+(define-read-only (emergency-cooldown-complete (user principal))
+  (match (map-get? emergency-withdrawals {user: user})
+    emergency (>= (- stacks-block-height (get initiated-at emergency)) emergency-cooldown-blocks)
     false
   )
 )
