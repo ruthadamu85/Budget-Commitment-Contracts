@@ -17,6 +17,10 @@
 (define-constant err-emergency-exists (err u113))
 (define-constant emergency-cooldown-blocks u144)
 
+(define-constant err-delegation-not-found (err u114))
+(define-constant err-delegate-limit-exceeded (err u115))
+(define-constant err-delegation-exists (err u116))
+
 (define-map budget-commitments
   { user: principal }
   {
@@ -461,4 +465,95 @@
     emergency (>= (- stacks-block-height (get initiated-at emergency)) emergency-cooldown-blocks)
     false
   )
+)
+
+(define-map budget-delegations
+  { delegator: principal, delegate-id: uint }
+  {
+    delegate: principal,
+    allocated-amount: uint,
+    spent-amount: uint,
+    created-at: uint,
+    active: bool
+  }
+)
+
+(define-map delegation-counters
+  { delegator: principal }
+  { next-delegate-id: uint }
+)
+
+(define-public (delegate-budget (delegate principal) (allocated-amount uint))
+  (let (
+    (delegator tx-sender)
+    (commitment (unwrap! (map-get? budget-commitments {user: delegator}) err-not-found))
+    (counter-data (default-to {next-delegate-id: u1} (map-get? delegation-counters {delegator: delegator})))
+    (delegate-id (get next-delegate-id counter-data))
+    (available-amount (- (get locked-amount commitment) (get spent-amount commitment)))
+  )
+    (asserts! (get active commitment) err-commitment-locked)
+    (asserts! (> allocated-amount u0) err-invalid-amount)
+    (asserts! (<= allocated-amount available-amount) err-insufficient-funds)
+    
+    (map-set budget-delegations
+      {delegator: delegator, delegate-id: delegate-id}
+      {
+        delegate: delegate,
+        allocated-amount: allocated-amount,
+        spent-amount: u0,
+        created-at: stacks-block-height,
+        active: true
+      }
+    )
+    
+    (map-set delegation-counters {delegator: delegator} {next-delegate-id: (+ delegate-id u1)})
+    (ok delegate-id)
+  )
+)
+
+(define-public (spend-as-delegate (delegator principal) (delegate-id uint) (amount uint) (recipient principal))
+  (let (
+    (delegate tx-sender)
+    (delegation (unwrap! (map-get? budget-delegations {delegator: delegator, delegate-id: delegate-id}) err-delegation-not-found))
+    (commitment (unwrap! (map-get? budget-commitments {user: delegator}) err-not-found))
+  )
+    (asserts! (is-eq delegate (get delegate delegation)) err-unauthorized)
+    (asserts! (get active delegation) err-commitment-locked)
+    (asserts! (> amount u0) err-invalid-amount)
+    (asserts! (<= (+ (get spent-amount delegation) amount) (get allocated-amount delegation)) err-delegate-limit-exceeded)
+    (asserts! (<= amount (get locked-amount commitment)) err-insufficient-funds)
+    
+    (try! (as-contract (stx-transfer? amount tx-sender recipient)))
+    
+    (map-set budget-delegations
+      {delegator: delegator, delegate-id: delegate-id}
+      (merge delegation {spent-amount: (+ (get spent-amount delegation) amount)})
+    )
+    
+    (map-set budget-commitments
+      {user: delegator}
+      (merge commitment {
+        spent-amount: (+ (get spent-amount commitment) amount),
+        locked-amount: (- (get locked-amount commitment) amount)
+      })
+    )
+    (ok true)
+  )
+)
+
+(define-public (revoke-delegation (delegate-id uint))
+  (let (
+    (delegator tx-sender)
+    (delegation (unwrap! (map-get? budget-delegations {delegator: delegator, delegate-id: delegate-id}) err-delegation-not-found))
+  )
+    (map-set budget-delegations
+      {delegator: delegator, delegate-id: delegate-id}
+      (merge delegation {active: false})
+    )
+    (ok true)
+  )
+)
+
+(define-read-only (get-delegation (delegator principal) (delegate-id uint))
+  (map-get? budget-delegations {delegator: delegator, delegate-id: delegate-id})
 )
